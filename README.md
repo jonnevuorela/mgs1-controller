@@ -1,5 +1,5 @@
-# SDL2 controller mapper,
+### SDL2 controller mapper,
 to map 
 ## ds4 as a keyboard
 for 
-### Metal Gear Solid
+# Metal Gear Solid
