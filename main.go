@@ -3,28 +3,52 @@ package main
 import (
 	"fmt"
 	"log"
+	"math"
 	"os/exec"
-	"time"
 
 	"github.com/go-vgo/robotgo"
 	"github.com/veandco/go-sdl2/sdl"
 )
 
 const (
-	L2_AXIS           = 4         // Left trigger
-	R2_AXIS           = 5         // Right trigger
-	TRIGGER_THRESHOLD = 32767 / 2 // Threshold for considering trigger pressed
+	analogDeadzone   = 8000 // Threshold for analog stick movement
+	triggerThreshold = 16383
+
+	leftTriggerAxis  = 4
+	rightTriggerAxis = 5
+
+	DIR_NONE  = 0
+	DIR_UP    = 1 << 0
+	DIR_RIGHT = 1 << 1
+	DIR_DOWN  = 1 << 2
+	DIR_LEFT  = 1 << 3
 )
 
+// Simple mapping of controller buttons to keyboard keys
+var buttonKeyMap = map[int]string{
+	0:  "shift", // Cross
+	1:  "space", // Circle
+	2:  "lctrl", // Square
+	3:  "x",     // Triangle
+	4:  "tab",   // Share
+	5:  "k",     // PS Button
+	6:  "esc",   // Options
+	7:  "3",     // L3
+	8:  "2",     // R3
+	9:  "q",     // L1
+	10: "w",     // R1
+}
+
+var triggerKeyMap = map[int]string{
+	leftTriggerAxis:  "a",
+	rightTriggerAxis: "s",
+}
+
 type ControllerMapper struct {
-	running         bool
-	pressedKeys     map[string]bool
-	controller      *sdl.GameController
-	lastPressTime   time.Time
-	initialDelay    time.Duration
-	repeatDelay     time.Duration
-	analogState     map[string]bool
-	lastAnalogPress map[string]time.Time
+	running          bool
+	pressedKeys      map[string]bool
+	controller       *sdl.GameController
+	currentDirection int
 }
 
 func showAlert(message string) {
@@ -48,16 +72,13 @@ func NewControllerMapper() (*ControllerMapper, error) {
 		showAlert("Failed to open the game controller. Please reconnect the controller and try again.")
 		return nil, fmt.Errorf("failed to open controller")
 	}
-	fmt.Printf("Controller detected: %s\n", controller.Name())
 
+	fmt.Printf("Controller detected: %s\n", controller.Name())
 	return &ControllerMapper{
-		running:         true,
-		pressedKeys:     make(map[string]bool),
-		controller:      controller,
-		initialDelay:    500 * time.Millisecond,
-		repeatDelay:     50 * time.Millisecond,
-		analogState:     make(map[string]bool),
-		lastAnalogPress: make(map[string]time.Time),
+		running:          true,
+		pressedKeys:      make(map[string]bool),
+		controller:       controller,
+		currentDirection: DIR_NONE,
 	}, nil
 }
 
@@ -75,68 +96,87 @@ func (cm *ControllerMapper) releaseKey(key string) {
 	}
 }
 
-func (cm *ControllerMapper) handleAnalogDirection(direction string, isActive bool) {
-	keyMap := map[string]string{
-		"up":    "up",
-		"down":  "down",
-		"left":  "left",
-		"right": "right",
+func (cm *ControllerMapper) handleDirectionalInputs() {
+	direction := DIR_NONE
+
+	// Handle D-pad
+	if cm.controller.Button(sdl.CONTROLLER_BUTTON_DPAD_UP) == 1 {
+		direction |= DIR_UP
+	}
+	if cm.controller.Button(sdl.CONTROLLER_BUTTON_DPAD_DOWN) == 1 {
+		direction |= DIR_DOWN
+	}
+	if cm.controller.Button(sdl.CONTROLLER_BUTTON_DPAD_LEFT) == 1 {
+		direction |= DIR_LEFT
+	}
+	if cm.controller.Button(sdl.CONTROLLER_BUTTON_DPAD_RIGHT) == 1 {
+		direction |= DIR_RIGHT
 	}
 
-	key := keyMap[direction]
-	now := time.Now()
+	// Handle analog stick
+	x := cm.controller.Axis(sdl.CONTROLLER_AXIS_LEFTX)
+	y := cm.controller.Axis(sdl.CONTROLLER_AXIS_LEFTY)
 
-	if isActive {
-		if !cm.analogState[direction] {
-			cm.pressKey(key)
-			cm.analogState[direction] = true
-			cm.lastAnalogPress[direction] = now
-		} else {
-			timeSinceLast := now.Sub(cm.lastAnalogPress[direction])
-			if timeSinceLast >= cm.initialDelay {
-				cm.releaseKey(key)
-				cm.pressKey(key)
-				cm.lastAnalogPress[direction] = now.Add(-cm.initialDelay + cm.repeatDelay)
-			}
+	if math.Abs(float64(x)) > float64(analogDeadzone) || math.Abs(float64(y)) > float64(analogDeadzone) {
+		if x > analogDeadzone {
+			direction |= DIR_RIGHT
+		} else if x < -analogDeadzone {
+			direction |= DIR_LEFT
 		}
+		if y > analogDeadzone {
+			direction |= DIR_DOWN
+		} else if y < -analogDeadzone {
+			direction |= DIR_UP
+		}
+	}
+
+	// Update direction keys
+	if direction&DIR_UP != 0 {
+		cm.pressKey("up")
 	} else {
-		if cm.analogState[direction] {
+		cm.releaseKey("up")
+	}
+	if direction&DIR_DOWN != 0 {
+		cm.pressKey("down")
+	} else {
+		cm.releaseKey("down")
+	}
+	if direction&DIR_LEFT != 0 {
+		cm.pressKey("left")
+	} else {
+		cm.releaseKey("left")
+	}
+	if direction&DIR_RIGHT != 0 {
+		cm.pressKey("right")
+	} else {
+		cm.releaseKey("right")
+	}
+
+	cm.currentDirection = direction
+}
+
+func (cm *ControllerMapper) handleButtons() {
+	for button, key := range buttonKeyMap {
+		if cm.controller.Button(sdl.GameControllerButton(button)) == 1 {
+			cm.pressKey(key)
+		} else {
 			cm.releaseKey(key)
-			cm.analogState[direction] = false
-			delete(cm.lastAnalogPress, direction)
 		}
 	}
 }
 
-func (cm *ControllerMapper) handleAnalogStick(x, y int16) {
-	const deadzone = 8000 // SDL joystick values range from -32768 to 32767
-
-	cm.handleAnalogDirection("right", x > deadzone)
-	cm.handleAnalogDirection("left", x < -deadzone)
-	cm.handleAnalogDirection("down", y > deadzone)
-	cm.handleAnalogDirection("up", y < -deadzone)
-}
-
-// To read the triggers as analog values:
-func getTriggerValues(gameController *sdl.GameController) (l2, r2 int16) {
-	l2 = gameController.Axis(L2_AXIS)
-	r2 = gameController.Axis(R2_AXIS)
-	return
-}
-
-// Or to treat them as digital buttons:
-func areTriggersPressed(gameController *sdl.GameController) (l2Pressed, r2Pressed bool) {
-	l2 := gameController.Axis(L2_AXIS)
-	r2 := gameController.Axis(R2_AXIS)
-
-	l2Pressed = l2 > TRIGGER_THRESHOLD
-	r2Pressed = r2 > TRIGGER_THRESHOLD
-	return
+func (cm *ControllerMapper) handleTriggers() {
+	for axis, key := range triggerKeyMap {
+		if cm.controller.Axis(sdl.GameControllerAxis(axis)) > triggerThreshold {
+			cm.pressKey(key)
+		} else {
+			cm.releaseKey(key)
+		}
+	}
 }
 
 func (cm *ControllerMapper) Run() {
 	defer func() {
-		// Release all pressed keys
 		for key := range cm.pressedKeys {
 			cm.releaseKey(key)
 		}
@@ -144,62 +184,19 @@ func (cm *ControllerMapper) Run() {
 		sdl.Quit()
 	}()
 
-	buttonMap := map[int]string{
-		0:  "shift", // Cross
-		1:  "space", // Circle
-		2:  "LCTRL", // Square
-		3:  "x",     // Triangle
-		4:  "tab",   // Share
-		5:  "k",     // ??
-		6:  "esc",   // Options
-		7:  "3",     // L3
-		8:  "2",     // R3
-		9:  "q",     // L1
-		10: "w",     // R1
-		11: "up",    // dpad up
-		12: "down",  // dpad left
-		13: "left",  // dpad down
-		14: "right", // dpad right
-	}
-
 	for cm.running {
 		for event := sdl.PollEvent(); event != nil; event = sdl.PollEvent() {
-			switch event.(type) {
-			case *sdl.QuitEvent:
+			if _, ok := event.(*sdl.QuitEvent); ok {
 				cm.running = false
 				return
 			}
 		}
 
-		// Handle regular buttons
-		for button, key := range buttonMap {
-			state := cm.controller.Button(sdl.GameControllerButton(button))
-			if state == 1 {
-				cm.pressKey(key)
-			} else {
-				cm.releaseKey(key)
-			}
-		}
+		cm.handleDirectionalInputs()
+		cm.handleButtons()
+		cm.handleTriggers()
 
-		// Handle triggers (L2 and R2)
-		l2Pressed, r2Pressed := areTriggersPressed(cm.controller)
-		if l2Pressed {
-			cm.pressKey("a")
-		} else {
-			cm.releaseKey("a")
-		}
-		if r2Pressed {
-			cm.pressKey("s")
-		} else {
-			cm.releaseKey("s")
-		}
-
-		// Handle left analog stick
-		x := cm.controller.Axis(sdl.CONTROLLER_AXIS_LEFTX)
-		y := cm.controller.Axis(sdl.CONTROLLER_AXIS_LEFTY)
-		cm.handleAnalogStick(x, y)
-
-		time.Sleep(10 * time.Millisecond)
+		sdl.Delay(16) // ~60Hz polling rate
 	}
 }
 
